@@ -137,17 +137,6 @@ public class CustomAPIAuthenticationHandler extends AbstractHandler {
                 Autorization = "";
             }
 
-            /*
-            String cookie ="";
-            
-            try {
-            	cookie = (String) headers.get("cookie");
-            }catch(Exception e) {
-            	cookie ="";
-            }
-            */
-
-            //if (cookie == null || "".equals(cookie)) {
             if (Autorization != null && !"".equals(Autorization)) {
                 System.out.println("Autorization : " + Autorization.split(" ")[1]);
 
@@ -164,33 +153,7 @@ public class CustomAPIAuthenticationHandler extends AbstractHandler {
                 JsonObject tokenPayload = gson.fromJson(body, JsonObject.class);
 
                 String type = tokenPayload.get("type").getAsString();
-                /*
-	            String tier = null;
-	            
-	            try {
-					tier = tokenPayload.get("tier").getAsString();
-				} catch (Exception e) {
-					// TODO: handle exception
-					tier = "Bronze";
-					System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
-					//return false;
-				}
-				
-				if(null != tier) {
-					
-					if ("".equals(type)) {
-						System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
-						tier = "Bronze";
-						//return false;
-					}
-					
-				}else {
-					System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
-					tier = "Bronze";
-					//return false;
-				}            
-	            
-				*/
+
                 System.out.println("Type : " + type);
 
                 if (null != type) {
@@ -205,16 +168,9 @@ public class CustomAPIAuthenticationHandler extends AbstractHandler {
                     return false;
                 }
 
-
-                //			System.out.println("epoch time: "+tokenPayload.get("exp").getAsLong());
-
                 Date dataExp = new Date(Long.parseLong(tokenPayload.get("exp").getAsString()) * 1000 L);
-
-
                 LocalDateTime dtToken = dataExp.toInstant().atZone(ZoneId.systemDefault()).toLocalDateTime();
 
-                //			System.out.println("dataExp "+ dataExp);
-                //			System.out.println("LocalDateTime.now() "+ LocalDateTime.now());
                 System.out.println("Expirado? " + LocalDateTime.now().isAfter(dtToken));
 
                 return !LocalDateTime.now().isAfter(dtToken);
