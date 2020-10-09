@@ -116,14 +116,6 @@ public class CustomAPIAuthenticationHandler extends AbstractHandler {
 
     public boolean authenticate(MessageContext synCtx) {
 
-        /*
-        System.out.println("----- synCtx------");
-        System.out.println(synCtx);
-        System.out.println("----- synCtx.to------");
-        System.out.println(synCtx.getTo().toString());
-        System.out.println("----- fim synCtx.to------");
-        */
-
         String token = "";
         try {
 
