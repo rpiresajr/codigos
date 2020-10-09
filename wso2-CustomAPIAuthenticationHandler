@@ -1,0 +1,618 @@
+
+import org.apache.synapse.core.axis2.Axis2MessageContext;
+import org.apache.synapse.rest.AbstractHandler; 
+import org.eclipse.jetty.util.log.Log;
+
+
+import org.wso2.carbon.apimgt.*;
+import org.wso2.carbon.apimgt.gateway.*;
+import org.wso2.carbon.apimgt.gateway.internal.*;
+
+
+
+
+import org.wso2.carbon.apimgt.gateway.handlers.security.APISecurityConstants;
+import org.wso2.carbon.apimgt.gateway.handlers.security.APISecurityException;
+import org.wso2.carbon.apimgt.gateway.handlers.security.APISecurityUtils;
+import org.wso2.carbon.apimgt.gateway.handlers.security.AuthenticationContext;
+
+import org.apache.axiom.om.OMAbstractFactory;
+import org.apache.axiom.om.OMElement;
+import org.apache.axiom.om.OMFactory;
+import org.apache.axiom.om.OMNamespace;
+import org.apache.axis2.AxisFault;
+import org.apache.axis2.java.security.TrustAllTrustManager;
+import org.apache.commons.codec.binary.Base64;
+import org.apache.derby.tools.sysinfo;
+import org.apache.synapse.*;
+import org.apache.synapse.transport.passthru.util.RelayUtils;
+import org.wso2.carbon.apimgt.gateway.handlers.Utils;
+import org.wso2.carbon.apimgt.impl.APIConstants;
+import org.wso2.carbon.apimgt.impl.APIManagerConfiguration;
+import org.wso2.carbon.apimgt.impl.dto.VerbInfoDTO;
+import org.wso2.carbon.apimgt.impl.utils.APIUtil;
+import org.wso2.carbon.metrics.manager.Level;
+import org.wso2.carbon.metrics.manager.MetricManager;
+import org.wso2.carbon.metrics.manager.Timer;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+
+import edu.umd.cs.findbugs.annotations.SuppressWarnings;
+
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.StringTokenizer;
+import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+
+
+public class CustomAPIAuthenticationHandler extends AbstractHandler {
+    Gson gson = new Gson();
+
+    @SuppressWarnings(value = {
+        "EXS_EXCEPTION_SOFTENING_RETURN_FALSE"
+    }, justification = "Error is sent through payload")
+    public boolean handleRequest(MessageContext messageContext) {
+
+
+        System.out.println(messageContext);
+
+        Timer timer = MetricManager.timer(Level.INFO, MetricManager.name("org.wso2.am", new String[] {
+            getClass().getSimpleName()
+        }));
+
+        System.out.print("handleRequest timer  : " + timer);
+
+        Timer.Context context = timer.start();
+        long startTime = System.nanoTime();
+
+        try {
+
+            if (authenticate(messageContext)) {
+                String messageDetails;
+                long endTime = System.nanoTime();
+                long difference = (endTime - startTime) / 1000000 L;
+                //messageDetails = logMessageDetails(messageContext);
+
+                System.out.println("Authenticated API, authentication response relieved, elapsedTimeInMilliseconds=" + difference / 1000000 L);
+                setAPIParametersToMessageContext(messageContext);
+                System.out.println("Retornando OK para validacao do Token");
+                return true;
+            } else {
+                handleAuthFailure(messageContext, new APISecurityException(401, "Token invalido ou expirado"));
+                return false;
+
+            }
+        } catch (APISecurityException e) {
+            handleAuthFailure(messageContext, e);
+            return false;
+        } finally {
+            messageContext.setProperty("security_latency", Long.valueOf(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)));
+
+            context.stop();
+        }
+    }
+
+    public boolean handleResponse(MessageContext messageContext) {
+        return true;
+    }
+
+
+    public boolean authenticate(MessageContext synCtx) {
+
+        /*
+        System.out.println("----- synCtx------");
+        System.out.println(synCtx);
+        System.out.println("----- synCtx.to------");
+        System.out.println(synCtx.getTo().toString());
+        System.out.println("----- fim synCtx.to------");
+        */
+
+        String token = "";
+        try {
+
+            System.out.println(synCtx);
+            Map headers = getTransportHeaders(synCtx);
+            String Autorization = "";
+
+            try {
+                Autorization = (String) headers.get("Authorization");
+            } catch (Exception e) {
+                Autorization = "";
+            }
+
+            /*
+            String cookie ="";
+            
+            try {
+            	cookie = (String) headers.get("cookie");
+            }catch(Exception e) {
+            	cookie ="";
+            }
+            */
+
+            //if (cookie == null || "".equals(cookie)) {
+            if (Autorization != null && !"".equals(Autorization)) {
+                System.out.println("Autorization : " + Autorization.split(" ")[1]);
+
+                if (!Autorization.startsWith("Bearer")) {
+                    return false;
+                }
+
+                token = Autorization.split(" ")[1];
+
+                System.out.println("Token: " + token);
+
+                String[] tokenParts = token.split("\\.");
+                String body = new String(Base64.decodeBase64(tokenParts[1].getBytes()));
+                JsonObject tokenPayload = gson.fromJson(body, JsonObject.class);
+
+                String type = tokenPayload.get("type").getAsString();
+                /*
+	            String tier = null;
+	            
+	            try {
+					tier = tokenPayload.get("tier").getAsString();
+				} catch (Exception e) {
+					// TODO: handle exception
+					tier = "Bronze";
+					System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
+					//return false;
+				}
+				
+				if(null != tier) {
+					
+					if ("".equals(type)) {
+						System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
+						tier = "Bronze";
+						//return false;
+					}
+					
+				}else {
+					System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
+					tier = "Bronze";
+					//return false;
+				}            
+	            
+				*/
+                System.out.println("Type : " + type);
+
+                if (null != type) {
+
+                    if (!"0".equals(type)) {
+                        System.out.println("Este token é um refresh token!");
+                        return false;
+                    }
+
+                } else {
+                    System.out.println("Este token nao é valido!");
+                    return false;
+                }
+
+
+                //			System.out.println("epoch time: "+tokenPayload.get("exp").getAsLong());
+
+                Date dataExp = new Date(Long.parseLong(tokenPayload.get("exp").getAsString()) * 1000 L);
+
+
+                LocalDateTime dtToken = dataExp.toInstant().atZone(ZoneId.systemDefault()).toLocalDateTime();
+
+                //			System.out.println("dataExp "+ dataExp);
+                //			System.out.println("LocalDateTime.now() "+ LocalDateTime.now());
+                System.out.println("Expirado? " + LocalDateTime.now().isAfter(dtToken));
+
+                return !LocalDateTime.now().isAfter(dtToken);
+            } else {
+                String cookie = "";
+                boolean ret = false;
+
+                try {
+                    cookie = (String) headers.get("cookie");
+                    if (cookie == null) cookie = "";
+                } catch (Exception e) {
+                    cookie = "";
+                }
+
+
+                if (!"".equals(cookie)) {
+                    System.out.println("Realizando uma validacao via cookie --> Cookies recebidos:  " + cookie);
+
+
+                    String[] cookies = cookie.split(" ");
+
+
+                    int count = 3;
+
+                    for (int i = 0; i < cookies.length; i++) {
+                        String[] campos = cookies[i].split("=");
+                        switch (campos[0]) {
+                            case "experimentation_subject_id":
+                            case "csrftoken":
+                            case "sessionid_mediador":
+                                count--;
+                                break;
+
+                            default:
+                                break;
+                        }
+
+                    }
+
+                    if (count == 0) {
+                        ret = true;
+                    }
+                } else {
+                    String to = (String) synCtx.getTo().toString();
+                    System.out.println("Verificando o contexto: " + to);
+                    String[] cntx = to.split("\n");
+
+                    for (int i = 0; i < cntx.length; i++) {
+                        String[] cp = cntx[i].split(":");
+                        System.out.println("Validando " + cp[0]);
+                        if ("Address".equals(cp[0])) {
+                            String[] ult = cp[1].split("/");
+
+                            int t = (ult.length) - 1;
+
+                            if ("auth".equals(ult[t].trim())) {
+                                ret = true;
+                            }
+
+                        }
+                        System.out.println("Campo [" + i + "]: " + cntx[i]);
+                    }
+
+
+                }
+
+                System.out.println("Saindo ... " + ret);
+
+                return ret;
+            }
+
+        } catch (Exception e) {
+            // TODO: handle exception
+            System.out.println("---------    falha authenticate : " + e.getMessage());
+
+            return false;
+        }
+
+    }
+
+    private Map getTransportHeaders(MessageContext messageContext) {
+        return (Map)((Axis2MessageContext) messageContext).getAxis2MessageContext().
+        getProperty(org.apache.axis2.context.MessageContext.TRANSPORT_HEADERS);
+    }
+
+
+    private void handleAuthFailure(org.apache.synapse.MessageContext messageContext, APISecurityException e) {
+
+        messageContext.setProperty("ERROR_CODE", Integer.valueOf(e.getErrorCode()));
+        messageContext.setProperty("ERROR_MESSAGE", APISecurityConstants.getAuthenticationFailureMessage(e.getErrorCode()));
+
+        messageContext.setProperty("ERROR_EXCEPTION", e);
+
+        Mediator sequence = messageContext.getSequence("_auth_failure_handler_");
+
+
+        if ((sequence != null) && (!sequence.mediate(messageContext))) {
+            return;
+        }
+        org.apache.axis2.context.MessageContext axis2MC = ((Axis2MessageContext) messageContext).getAxis2MessageContext();
+
+
+        axis2MC.setProperty("message.builder.invoked", Boolean.TRUE);
+        System.out.println("axis2MC setProperty " + true);
+        try {
+            RelayUtils.consumeAndDiscardMessage(axis2MC);
+        } catch (AxisFault axisFault) {
+            System.out.println("Error occurred while consuming and discarding the message " + axisFault);
+        }
+
+
+        axis2MC.setProperty("messageType", "application/soap+xml");
+        int status;
+
+        if (e.getErrorCode() == 900900) {
+            status = 500;
+        } else {
+            //int status;
+            if ((e.getErrorCode() == 900906) || (e.getErrorCode() == 900908) || (e.getErrorCode() == 900910)) {
+                status = 403;
+                Map < String, String > headers = new HashMap < String, String > ();
+                headers.put("WWW-Authenticate", "error=\"operation not allowed\"" + ", error_description=\"This action is not allowed\"");
+                axis2MC.setProperty("TRANSPORT_HEADERS", headers);
+            } else {
+                status = 401;
+                Map < String, String > headers = new HashMap < String, String > ();
+                headers.put("WWW-Authenticate", "error=\"invalid token\"" + ", error_description=\"The access token invalid or expired\"");
+                axis2MC.setProperty("TRANSPORT_HEADERS", headers);
+            }
+        }
+
+        if ((messageContext.isDoingPOX()) || (messageContext.isDoingGET())) {
+            Utils.setFaultPayload(messageContext, getFaultPayload(e));
+        } else {
+            Utils.setSOAPFault(messageContext, "Client", "Authentication Failure", e.getMessage());
+        }
+        Utils.sendFault(messageContext, status);
+        System.out.println("saindo handleAuthFailure");
+    }
+
+    private OMElement getFaultPayload(APISecurityException e) {
+        OMFactory fac = OMAbstractFactory.getOMFactory();
+        OMNamespace ns = fac.createOMNamespace("http://wso2.org/apimanager/security", "ams");
+
+        OMElement payload = fac.createOMElement("fault", ns);
+
+        OMElement errorCode = fac.createOMElement("code", ns);
+        errorCode.setText(String.valueOf(e.getErrorCode()));
+        OMElement errorMessage = fac.createOMElement("message", ns);
+        errorMessage.setText(APISecurityConstants.getAuthenticationFailureMessage(e.getErrorCode()));
+        OMElement errorDetail = fac.createOMElement("description", ns);
+        errorDetail.setText(APISecurityConstants.getFailureMessageDetailDescription(e.getErrorCode(), e.getMessage()));
+
+        payload.addChild(errorCode);
+        payload.addChild(errorMessage);
+        payload.addChild(errorDetail);
+        return payload;
+    }
+
+    private void setAPIParametersToMessageContext(org.apache.synapse.MessageContext messageContext) throws APISecurityException {
+
+        org.apache.axis2.context.MessageContext axis2MsgContext = ((Axis2MessageContext) messageContext).getAxis2MessageContext();
+        String username = "", participante = "", type = "";
+
+        String context = (String) messageContext.getProperty("REST_API_CONTEXT");
+
+
+
+        String apiVersion = (String) messageContext.getProperty("SYNAPSE_REST_API");
+
+        String accessToken = (String)((TreeMap) axis2MsgContext.getProperty("TRANSPORT_HEADERS")).get("Authorization");
+        String cookie = (String)((TreeMap) axis2MsgContext.getProperty("TRANSPORT_HEADERS")).get("cookie");
+
+
+        JsonObject tokenPayload = null;
+        if (null != accessToken) {
+            String[] tokenParts = accessToken.split("\\.");
+
+            String body = new String(Base64.decodeBase64(tokenParts[1].getBytes()));
+            tokenPayload = gson.fromJson(body, JsonObject.class);
+
+            if (null != tokenPayload.get("sub"))
+                username = tokenPayload.get("sub").getAsString();
+            if (null != tokenPayload.get("participante"))
+                participante = tokenPayload.get("participante").getAsString();
+            if (null != tokenPayload.get("type"))
+                type = tokenPayload.get("type").getAsString();
+
+
+            System.out.println("Retrieved usuario [" + username + "]  participante [" + participante + "] type[" + type + "]");
+
+        } else {
+            username = "Web";
+            participante = "Web";
+            type = "0";
+        }
+
+
+        String apiPublisher = (String) messageContext.getProperty("api.ut.apiPublisher");
+        if (apiPublisher == null) {
+            int ind = apiVersion.indexOf("--");
+            apiPublisher = apiVersion.substring(0, ind);
+            if (apiPublisher.contains("-AT-")) {
+                apiPublisher = apiPublisher.replace("-AT-", "@");
+            }
+        }
+        System.out.println("apiVersion: " + apiVersion);
+        int index = apiVersion.indexOf("--");
+        if (index != -1) {
+            apiVersion = apiVersion.substring(index + 2);
+        }
+
+        String api = apiVersion.split(":")[0];
+        String version = (String) messageContext.getProperty("SYNAPSE_REST_API_VERSION");
+
+        String resource = extractResource(messageContext);
+
+        String method = (String) axis2MsgContext.getProperty("HTTP_METHOD");
+
+        System.out.println("Metodo :" + method);
+
+        String hostName = APIUtil.getHostAddress();
+
+        messageContext.setProperty("api.ut.userId", username);
+        messageContext.setProperty("api.ut.context", context);
+        messageContext.setProperty("api.ut.api_version", apiVersion);
+        messageContext.setProperty("api.ut.api", api);
+        messageContext.setProperty("api.ut.version", version);
+        messageContext.setProperty("api.ut.resource", resource);
+        messageContext.setProperty("api.ut.HTTP_METHOD", method);
+        messageContext.setProperty("api.ut.hostName", hostName);
+        messageContext.setProperty("api.ut.apiPublisher", apiPublisher);
+
+        // OPERATION_THROTTLING_MAPPING
+        List < VerbInfoDTO > verbInfoList = new ArrayList < VerbInfoDTO > ();
+
+        VerbInfoDTO verbInfoDTO = new VerbInfoDTO();
+        //HashMap<String, String> operationThrottlingMappingList =
+        //        (HashMap<String, String>) messageContext.getProperty(APIConstants.THROTTLE_OUT_REASON_HARD_LIMIT_EXCEEDED);
+
+        ///API_ELECTED_RESOURCE
+        String matchingResource = (String) messageContext.getProperty(APIConstants.API_RESOURCE_NAME);
+
+
+
+        //String[] operationList = matchingResource.split(",");
+
+        verbInfoDTO.setAuthType(APIConstants.AUTH_APPLICATION_OR_USER_LEVEL_TOKEN);
+        //verbInfoDTO.setThrottling(operationThrottlingMappingList.get(operation));
+
+
+        verbInfoList.add(verbInfoDTO);
+
+        messageContext.setProperty(APIConstants.VERB_INFO_DTO, verbInfoList);
+
+
+        String nkeytype = "keytype";
+
+        try {
+            nkeytype = tokenPayload.get("keytype").getAsString();
+
+            if (nkeytype == null) {
+                nkeytype = APIConstants.API_KEY_TYPE_PRODUCTION;
+            } else {
+                if (nkeytype != "prd") {
+                    nkeytype = APIConstants.API_KEY_TYPE_SANDBOX;
+                } else {
+                    nkeytype = APIConstants.API_KEY_TYPE_PRODUCTION;
+                }
+            }
+        } catch (Exception e) {
+            // TODO: handle exception
+            nkeytype = APIConstants.API_KEY_TYPE_PRODUCTION;
+        }
+
+        if (cookie != null) {
+            if (!"".equals(cookie)) {
+                nkeytype = APIConstants.API_KEY_TYPE_PRODUCTION;
+            }
+        }
+
+        final String keytype = nkeytype;
+
+
+        String ntier = "";
+
+        try {
+            ntier = tokenPayload.get("tier").getAsString();
+
+            if (ntier == null) {
+                System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
+                ntier = APIConstants.DEFAULT_SUB_POLICY_BRONZE;
+            } else {
+                if (ntier == "") {
+                    System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
+                    ntier = APIConstants.DEFAULT_SUB_POLICY_BRONZE;
+                }
+            }
+        } catch (Exception e) {
+            // TODO: handle exception
+            System.out.println("Este token nao possui tier! Será atribuido para o Bronze");
+            ntier = APIConstants.DEFAULT_SUB_POLICY_BRONZE;
+        }
+
+        if (cookie != null) {
+            if (!"".equals(cookie)) {
+                ntier = "WEB";
+            }
+        }
+
+        String[] cntx = context.split("/");
+        if ("auth".equals(cntx[(cntx.length - 1)]) && "POST".equals(method)) {
+            username = "Auth";
+            participante = "Auth";
+            ntier = "AUTH";
+        }
+
+
+        final String tier = ntier;
+
+        System.out.println("Tier : " + tier);
+
+        String clientIP = null;
+        org.apache.axis2.context.MessageContext axis2MessageContext = ((Axis2MessageContext) messageContext).
+        getAxis2MessageContext();
+        TreeMap < String, String > transportHeaderMap = (TreeMap < String, String > ) axis2MessageContext
+            .getProperty(org.apache.axis2.context.MessageContext.TRANSPORT_HEADERS);
+
+
+
+
+        if (transportHeaderMap != null) {
+            clientIP = transportHeaderMap.get(APIMgtGatewayConstants.X_FORWARDED_FOR);
+        }
+
+        //Setting IP of the client
+        if (clientIP != null && !clientIP.isEmpty()) {
+            if (clientIP.indexOf(",") > 0) {
+                clientIP = clientIP.substring(0, clientIP.indexOf(","));
+            }
+        } else {
+            clientIP = (String) axis2MessageContext
+                .getProperty(org.apache.axis2.context.MessageContext.REMOTE_ADDR);
+        }
+
+        System.out.println(">>>> clientIP:" + clientIP);
+        //Create a dummy AuthenticationContext object with hard coded values for
+        // Tier and KeyType. This is because we cannot determine the Tier nor Key
+        // Type without subscription information..
+        AuthenticationContext authContext = new AuthenticationContext();
+        authContext.setAuthenticated(true);
+        ////	                                         UNAUTHENTICATED_TIER
+        authContext.setTier(tier);
+        authContext.setApiTier(tier);
+        //authContext.setApplicationTier(tier);
+
+        //authContext.setSubscriber(tier);
+
+        //authContext.setSpikeArrestLimit(5);
+        //authContext.setSpikeArrestUnit(APIConstants.TIME_UNIT_SECOND);
+        //authContext.setThrottlingDataList(throttlingDataList);
+
+        //Since we don't have details on unauthenticated tier we setting stop on quota reach true
+        authContext.setStopOnQuotaReach(true);
+        //Requests are throttled by the ApiKey that is set here. In an unauthenticated scenario,
+        //we will use the client's IP address for throttling.
+        authContext.setApiKey(clientIP);
+        authContext.setKeyType(keytype);
+        //This name is hardcoded as anonymous because there is no associated user token
+        authContext.setUsername(APIConstants.END_USER_ANONYMOUS);
+        authContext.setCallerToken(null);
+        authContext.setApplicationName(null);
+        authContext.setApplicationId(clientIP); //Set clientIp as application ID in unauthenticated scenario
+        authContext.setConsumerKey(null);
+        //authContext.setSubscriberTenantDomain("admin@carbon.super");
+
+
+        List < String > throttlingDataList = new ArrayList < String > ();
+
+        throttlingDataList.add(tier);
+
+        authContext.setThrottlingDataList(throttlingDataList);
+
+        APISecurityUtils.setAuthenticationContext(messageContext, authContext, null);
+
+
+
+
+    }
+
+    private String extractResource(org.apache.synapse.MessageContext mc) {
+        System.out.println("extractResource : " + mc);
+        String resource = "/";
+        Pattern pattern = Pattern.compile("^/.+?/.+?([/?].+)$");
+        Matcher matcher = pattern.matcher((String) mc.getProperty("REST_FULL_REQUEST_PATH"));
+        if (matcher.find()) {
+            resource = matcher.group(1);
+        }
+        return resource;
+    }
+}
